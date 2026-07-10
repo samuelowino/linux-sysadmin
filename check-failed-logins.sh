@@ -33,6 +33,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Function to safely get count from grep
+safe_grep_count() {
+    local pattern="$1"
+    local file="$2"
+    local count=0
+    
+    if [[ -f "$file" ]]; then
+        count=$(grep -c "$pattern" "$file" 2>/dev/null | head -1 | tr -d '\n\r' || echo "0")
+        # If count contains newline or multiple values, take first
+        count=$(echo "$count" | awk '{print $1}')
+        # Ensure it's a number
+        if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+            count=0
+        fi
+    fi
+    echo "$count"
+}
+
 # Find auth log
 find_auth_log() {
     local logs=(
@@ -59,6 +77,12 @@ if [[ -z "$AUTH_LOG" ]]; then
     exit 1
 fi
 
+# Get counts safely
+total_ssh_failures=$(safe_grep_count "Failed password" "$AUTH_LOG")
+total_invalid_users=$(safe_grep_count "Invalid user" "$AUTH_LOG")
+total_connection_errors=$(safe_grep_count "Connection closed\|Connection reset\|Connection refused" "$AUTH_LOG")
+total_auth_failures=$(safe_grep_count "authentication failure" "$AUTH_LOG")
+
 # Function to get logs from last N hours
 get_recent_logs() {
     if command -v journalctl &>/dev/null && [[ "$AUTH_LOG" == "/var/log/auth.log" || "$AUTH_LOG" == "/var/log/secure" ]]; then
@@ -78,36 +102,37 @@ get_recent_logs() {
     fi
 }
 
-# Color output for JSON mode
+# JSON output mode
 if [[ "$JSON_OUTPUT" == true ]]; then
-    # JSON output mode
     echo "{"
     echo "  \"timestamp\": \"$(date -Iseconds)\","
     echo "  \"host\": \"$(hostname)\","
     echo "  \"auth_log\": \"$AUTH_LOG\","
     echo "  \"analysis\": {"
-    
-    # Get counts
-    local total_ssh_failures=$(grep -c "Failed password" "$AUTH_LOG" 2>/dev/null || echo "0")
-    local total_invalid_users=$(grep -c "Invalid user" "$AUTH_LOG" 2>/dev/null || echo "0")
-    local total_connection_errors=$(grep -c "Connection closed\|Connection reset" "$AUTH_LOG" 2>/dev/null || echo "0")
-    
     echo "    \"ssh_failures\": $total_ssh_failures,"
     echo "    \"invalid_users\": $total_invalid_users,"
     echo "    \"connection_errors\": $total_connection_errors,"
     
     # Get top attacking IPs
     echo "    \"top_attackers\": ["
-    grep "Failed password" "$AUTH_LOG" 2>/dev/null | awk '{print $(NF-3)}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | sort | uniq -c | sort -rn | head -"$TOP_N" | while read -r count ip; do
-        echo "      {\"ip\": \"$ip\", \"attempts\": $count},"
-    done | sed '$ s/,$//'
+    grep "Failed password" "$AUTH_LOG" 2>/dev/null | \
+        awk '{print $(NF-3)}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort | uniq -c | sort -rn | head -"$TOP_N" | \
+        while read -r count ip; do
+            echo "      {\"ip\": \"$ip\", \"attempts\": $count},"
+        done | sed '$ s/,$//'
     echo "    ],"
     
     # Get top usernames tried
     echo "    \"top_usernames\": ["
-    grep "Failed password\|Invalid user" "$AUTH_LOG" 2>/dev/null | grep -o "user [^ ]*" | awk '{print $2}' | sort | uniq -c | sort -rn | head -10 | while read -r count user; do
-        echo "      {\"username\": \"$user\", \"attempts\": $count},"
-    done | sed '$ s/,$//'
+    grep "Failed password\|Invalid user" "$AUTH_LOG" 2>/dev/null | \
+        grep -o "user [^ ]*" | \
+        awk '{print $2}' | \
+        sort | uniq -c | sort -rn | head -10 | \
+        while read -r count user; do
+            echo "      {\"username\": \"$user\", \"attempts\": $count},"
+        done | sed '$ s/,$//'
     echo "    ]"
     
     echo "  }"
@@ -123,12 +148,6 @@ echo -e "${BLUE}  Log: $AUTH_LOG (last $HOURS hours)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 echo -e "\n${GREEN}▶ SUMMARY STATISTICS${NC}"
-
-# Get counts correctly
-total_ssh_failures=$(grep -c "Failed password" "$AUTH_LOG" 2>/dev/null || echo "0")
-total_invalid_users=$(grep -c "Invalid user" "$AUTH_LOG" 2>/dev/null || echo "0")
-total_connection_errors=$(grep -c "Connection closed\|Connection reset\|Connection refused" "$AUTH_LOG" 2>/dev/null || echo "0")
-total_auth_failures=$(grep -c "authentication failure" "$AUTH_LOG" 2>/dev/null || echo "0")
 
 echo -e "  ${CYAN}SSH Password Failures:${NC} $total_ssh_failures"
 echo -e "  ${CYAN}Invalid Usernames Attempted:${NC} $total_invalid_users"
@@ -151,48 +170,59 @@ fi
 
 echo -e "  ${CYAN}Threat Level:${NC} ${threat_color}$threat_level${NC}"
 
+# Get top attacking IPs
 echo -e "\n${GREEN}▶ TOP ATTACKING IP ADDRESSES${NC}"
 if [[ $total_ssh_failures -eq 0 ]]; then
     echo -e "  ${GREEN}✅ No failed SSH attempts found${NC}"
 else
     echo "  (Last $HOURS hours)"
+    
+    # Check if we have geoip capability
+    HAS_GEOIP=false
+    if command -v curl &>/dev/null; then
+        HAS_GEOIP=true
+    fi
+    
     grep "Failed password" "$AUTH_LOG" 2>/dev/null | \
         awk '{print $(NF-3)}' | \
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
         sort | uniq -c | sort -rn | head -"$TOP_N" | \
         while read -r count ip; do
-            # Check if IP is in common safe lists
-            if [[ "$ip" == "127.0.0.1" || "$ip" == "::1" || "$ip" == "10."* || "$ip" == "192.168."* || "$ip" == "172.16."* || "$ip" == "172.17."* || "$ip" == "172.18."* || "$ip" == "172.19."* || "$ip" == "172.20."* || "$ip" == "172.21."* || "$ip" == "172.22."* || "$ip" == "172.23."* || "$ip" == "172.24."* || "$ip" == "172.25."* || "$ip" == "172.26."* || "$ip" == "172.27."* || "$ip" == "172.28."* || "$ip" == "172.29."* || "$ip" == "172.30."* || "$ip" == "172.31."* ]]; then
-                echo -e "  ${YELLOW}⚠️${NC} $count attempts from $ip (local/internal)"
+            # Check if IP is internal
+            if [[ "$ip" =~ ^(127\.|10\.|192\.168\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.) ]]; then
+                echo -e "  ${YELLOW}⚠️${NC} $count attempts from $ip (internal)"
             else
-                # Try to get geolocation (optional - requires curl)
-                if command -v curl &>/dev/null; then
-                    geo=$(curl -s "http://ip-api.com/line/$ip?fields=countryCode,region,city" 2>/dev/null | head -1 || echo "unknown")
-                    if [[ -n "$geo" && "$geo" != "unknown" ]]; then
-                        echo -e "  ${RED}🚨${NC} $count attempts from $ip ($geo)"
+                # Try geolocation if available
+                geo_info=""
+                if [[ "$HAS_GEOIP" == true ]]; then
+                    # Quick geo lookup with timeout
+                    geo_info=$(curl -s --max-time 2 "http://ip-api.com/line/$ip?fields=countryCode,city" 2>/dev/null | head -2 | tr '\n' ' ' | xargs)
+                    if [[ -n "$geo_info" && "$geo_info" != " " ]]; then
+                        geo_info=" ($geo_info)"
                     else
-                        echo -e "  ${RED}🚨${NC} $count attempts from $ip"
+                        geo_info=""
                     fi
-                else
-                    echo -e "  ${RED}🚨${NC} $count attempts from $ip"
                 fi
+                echo -e "  ${RED}🚨${NC} $count attempts from $ip$geo_info"
             fi
         done
 fi
 
+# Most common usernames
 echo -e "\n${GREEN}▶ MOST COMMON USERNAMES ATTEMPTED${NC}"
 grep "Failed password\|Invalid user" "$AUTH_LOG" 2>/dev/null | \
     grep -o "user [^ ]*" | \
     awk '{print $2}' | \
     sort | uniq -c | sort -rn | head -10 | \
     while read -r count user; do
-        if [[ "$user" == "root" || "$user" == "admin" || "$user" == "ubuntu" || "$user" == "debian" ]]; then
+        if [[ "$user" =~ ^(root|admin|administrator|ubuntu|debian|test|guest|user|oracle|mysql|postgres|webmaster|ftp|backup)$ ]]; then
             echo -e "  ${RED}⚠️${NC} $count attempts for user: $user (common target!)"
         else
             echo -e "  ${YELLOW}⚠️${NC} $count attempts for user: $user"
         fi
     done
 
+# Recent failed attempts
 echo -e "\n${GREEN}▶ RECENT FAILED ATTEMPTS (last 10)${NC}"
 grep "Failed password" "$AUTH_LOG" 2>/dev/null | tail -10 | \
     sed 's/^/  /' | \
@@ -201,6 +231,7 @@ grep "Failed password" "$AUTH_LOG" 2>/dev/null | tail -10 | \
         echo "$line" | sed -E 's/([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/\x1b[31m\1\x1b[0m/g'
     done
 
+# Failed2ban status
 echo -e "\n${GREEN}▶ FAIL2BAN STATUS${NC}"
 if command -v fail2ban-client &>/dev/null; then
     if sudo fail2ban-client status 2>/dev/null | grep -q "Status"; then
@@ -209,23 +240,30 @@ if command -v fail2ban-client &>/dev/null; then
         sudo fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/^/    /'
         
         # Show banned IPs
-        echo "  Recently banned IPs:"
+        echo "  Banned IPs:"
+        banned_found=false
         for jail in $(sudo fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*Jail list://g' | tr -d ' ' | tr ',' ' '); do
             if [[ -n "$jail" ]]; then
                 banned=$(sudo fail2ban-client status "$jail" 2>/dev/null | grep "Banned IP list" | sed 's/.*://g' | tr -d ' ')
-                if [[ -n "$banned" ]]; then
+                if [[ -n "$banned" && "$banned" != " " ]]; then
                     echo "    $jail: $banned"
+                    banned_found=true
                 fi
             fi
         done
+        if [[ "$banned_found" == false ]]; then
+            echo "    No IPs currently banned"
+        fi
     else
         echo -e "  ${YELLOW}⚠️  fail2ban is installed but not running${NC}"
+        echo "  Start with: sudo systemctl start fail2ban"
     fi
 else
     echo -e "  ${YELLOW}⚠️  fail2ban not installed${NC}"
     echo "  Install: sudo apt install fail2ban  or  sudo dnf install fail2ban"
 fi
 
+# SSH hardening check
 echo -e "\n${GREEN}▶ SSH HARDENING CHECK${NC}"
 if [[ -f /etc/ssh/sshd_config ]]; then
     # Check PasswordAuthentication
@@ -258,13 +296,32 @@ if [[ -f /etc/ssh/sshd_config ]]; then
     
     # Check MaxAuthTries
     max_tries=$(grep -i "^MaxAuthTries" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "not set")
-    if [[ -n "$max_tries" && "$max_tries" -le 3 ]]; then
-        echo -e "  ${GREEN}✅ MaxAuthTries: $max_tries${NC}"
-    elif [[ -n "$max_tries" ]]; then
-        echo -e "  ${YELLOW}⚠️  MaxAuthTries: $max_tries (consider reducing to 3)${NC}"
+    if [[ -n "$max_tries" && "$max_tries" =~ ^[0-9]+$ ]]; then
+        if [[ $max_tries -le 3 ]]; then
+            echo -e "  ${GREEN}✅ MaxAuthTries: $max_tries${NC}"
+        else
+            echo -e "  ${YELLOW}⚠️  MaxAuthTries: $max_tries (consider reducing to 3)${NC}"
+        fi
+    fi
+    
+    # Check AllowUsers/AllowGroups
+    allow_users=$(grep -i "^AllowUsers" /etc/ssh/sshd_config 2>/dev/null | sed 's/AllowUsers //i')
+    if [[ -n "$allow_users" ]]; then
+        echo -e "  ${GREEN}✅ AllowUsers configured: $allow_users${NC}"
+    else
+        echo -e "  ${YELLOW}⚠️  AllowUsers not configured (consider restricting)${NC}"
+    fi
+    
+    # Check PubkeyAuthentication
+    pubkey=$(grep -i "^PubkeyAuthentication" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' || echo "not set")
+    if [[ "$pubkey" == "yes" ]]; then
+        echo -e "  ${GREEN}✅ PubkeyAuthentication: yes${NC}"
+    else
+        echo -e "  ${YELLOW}⚠️  PubkeyAuthentication: $pubkey (consider enabling)${NC}"
     fi
 fi
 
+# Recommendations
 echo -e "\n${GREEN}▶ RECOMMENDATIONS${NC}"
 if [[ $total_ssh_failures -gt 100 ]]; then
     echo -e "  ${RED}🔴 High number of SSH attacks detected!${NC}"
@@ -273,13 +330,49 @@ if [[ $total_ssh_failures -gt 100 ]]; then
     echo "  3. Change SSH port from 22"
     echo "  4. Use AllowUsers or AllowGroups to restrict access"
     echo "  5. Consider using a VPN or bastion host"
+    echo "  6. Use geoip blocking for high-risk countries"
 elif [[ $total_ssh_failures -gt 10 ]]; then
     echo -e "  ${YELLOW}🟡 Moderate SSH attack activity${NC}"
     echo "  1. Ensure fail2ban is running"
     echo "  2. Review authorized_keys for unused keys"
     echo "  3. Consider rate limiting"
+    echo "  4. Audit user accounts regularly"
 else
     echo -e "  ${GREEN}🟢 Low attack activity - continue monitoring${NC}"
+    echo "  1. Keep fail2ban running"
+    echo "  2. Regular security audits"
+    echo "  3. Keep system updated"
+fi
+
+# Additional stats
+echo -e "\n${GREEN}▶ ADDITIONAL STATISTICS${NC}"
+# Unique attacking IPs
+unique_ips=$(grep "Failed password" "$AUTH_LOG" 2>/dev/null | \
+    awk '{print $(NF-3)}' | \
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+    sort -u | wc -l)
+echo -e "  ${CYAN}Unique attacking IPs:${NC} $unique_ips"
+
+# Unique usernames attempted
+unique_users=$(grep "Failed password\|Invalid user" "$AUTH_LOG" 2>/dev/null | \
+    grep -o "user [^ ]*" | \
+    awk '{print $2}' | \
+    sort -u | wc -l)
+echo -e "  ${CYAN}Unique usernames attempted:${NC} $unique_users"
+
+# Top attacking country (if geoip available)
+if command -v curl &>/dev/null && [[ $total_ssh_failures -gt 10 ]]; then
+    echo -e "  ${CYAN}Top attacking countries:${NC}"
+    grep "Failed password" "$AUTH_LOG" 2>/dev/null | \
+        awk '{print $(NF-3)}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort -u | head -20 | \
+        while read -r ip; do
+            curl -s --max-time 1 "http://ip-api.com/line/$ip?fields=countryCode" 2>/dev/null
+        done | sort | uniq -c | sort -rn | head -5 | \
+        while read -r count country; do
+            echo "    $country: $count IPs"
+        done
 fi
 
 echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
