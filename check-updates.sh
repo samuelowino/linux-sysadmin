@@ -22,14 +22,14 @@ if command -v apt &>/dev/null; then
     echo "  Package manager: APT (Debian/Ubuntu)"
     
     echo "  Updating package lists..."
-    sudo apt update 2>/dev/null >/dev/null || echo "  ⚠️  'apt update' failed (run with sudo?)"
+    sudo apt update >/dev/null 2>&1 || echo "  ⚠️  'apt update' failed (run with sudo?)"
     
     updates=$(apt list --upgradable 2>/dev/null | wc -l)
-    security=$(apt list --upgradable 2>/dev/null | grep -c security || echo "0")
+    security=$(apt list --upgradable 2>/dev/null | grep -c "security" || echo "0")
     
     echo "  Total updates available: $((updates - 1))"
-    if [[ $security -gt 0 ]]; then
-        echo -e "  ${RED}⚠️  Security updates available: $security${NC}"
+    if [[ ${security} -gt 0 ]]; then
+        echo -e "  ${RED}⚠️  Security updates available: ${security}${NC}"
         apt list --upgradable 2>/dev/null | grep security | head -5 | sed 's/^/    /'
     else
         echo -e "  ${GREEN}✅ No security updates pending${NC}"
@@ -38,12 +38,11 @@ if command -v apt &>/dev/null; then
 elif command -v dnf &>/dev/null; then
     echo "  Package manager: DNF (RHEL/Fedora)"
     
-    # Check for updates
     updates=$(dnf check-update 2>/dev/null | wc -l)
     security=$(dnf check-update --security 2>/dev/null | wc -l)
     
     echo "  Total updates available: $((updates - 1))"
-    if [[ $security -gt 1 ]]; then
+    if [[ ${security} -gt 1 ]]; then
         echo -e "  ${RED}⚠️  Security updates available: $((security - 1))${NC}"
     else
         echo -e "  ${GREEN}✅ No security updates pending${NC}"
@@ -61,9 +60,9 @@ fi
 echo -e "\n${GREEN}▶ KERNEL VERSION${NC}"
 echo "  Current: $(uname -r)"
 if command -v apt &>/dev/null; then
-    kernel_updates=$(apt list --upgradable 2>/dev/null | grep -c "linux-image" || echo "0")
-    if [[ $kernel_updates -gt 0 ]]; then
-        echo -e "  ${YELLOW}⚠️  Kernel update available ($kernel_updates) - reboot needed!${NC}"
+    kernel_updates=$(apt list --upgradable 2>/dev/null | grep "linux-image" | wc -l)
+    if [[ ${kernel_updates} -gt 0 ]]; then
+        echo -e "  ${YELLOW}⚠️  Kernel update available (${kernel_updates}) - reboot needed!${NC}"
     else
         echo -e "  ${GREEN}✅ Kernel is up to date${NC}"
     fi
