@@ -16,7 +16,7 @@ echo -e "${BLUE}  $(date)${NC}"
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 echo -e "\n${GREEN}▶ USER ACCOUNTS${NC}"
-echo "  Total users: $(cat /etc/passwd | wc -l)"
+echo "  Total users: $(wc -l < /etc/passwd)"
 echo "  Users with shells: $(grep -c -E "/(bash|sh|zsh|fish)$" /etc/passwd)"
 
 echo -e "\n${GREEN}▶ SYSTEM USERS WITH SHELL ACCESS${NC}"
@@ -33,13 +33,16 @@ who | sed 's/^/  /'
 
 echo -e "\n${GREEN}▶ USERS WITH ROOT PRIVILEGES${NC}"
 if [[ -f /etc/sudoers ]]; then
-    grep -v "^#" /etc/sudoers 2>/dev/null | grep -v "^$" | grep -E "ALL|NOPASSWD" | sed 's/^/  /'
+    grep -v "^#" /etc/sudoers 2>/dev/null | grep -v "^$" | grep -E "ALL|NOPASSWD" | sed 's/^/  /' || true
 fi
-for sudo_file in /etc/sudoers.d/* 2>/dev/null; do
-    if [[ -f "$sudo_file" ]]; then
-        grep -v "^#" "$sudo_file" 2>/dev/null | grep -v "^$" | grep -E "ALL|NOPASSWD" | sed 's/^/  /'
-    fi
-done
+
+# Check sudoers.d directory
+if [[ -d /etc/sudoers.d ]]; then
+    for sudo_file in /etc/sudoers.d/*; do
+        [[ -f "$sudo_file" ]] || continue
+        grep -v "^#" "$sudo_file" 2>/dev/null | grep -v "^$" | grep -E "ALL|NOPASSWD" | sed 's/^/  /' || true
+    done
+fi
 
 echo -e "\n${GREEN}▶ LAST PASSWORD CHANGES${NC}"
 if [[ -f /etc/shadow ]] && [[ $EUID -eq 0 ]]; then
